@@ -11,9 +11,9 @@
 | Severity | Count |
 |----------|-------|
 | Critical | 1 |
-| High | 5 |
-| Medium | 9 |
-| Low | 2 |
+| High | 7 |
+| Medium | 12 |
+| Low | 3 |
 
 ---
 
@@ -265,6 +265,43 @@ The `.npmrc` setting currently prevents the `postinstall` script from running, b
 
 ---
 
+### M-10: Auth Token Cookie Without Secure/HttpOnly Flags
+
+**File:** `packages/analytics-js-legacy-utilities/src/storage/cookie.js:24`
+**Severity:** MEDIUM
+
+The `rl_auth_token` cookie is written without explicit `Secure`, `HttpOnly`, or `SameSite` flags. Without `Secure`, the cookie can be transmitted over plain HTTP connections. Without `HttpOnly`, client-side scripts (including injected third-party code) can read it. Without `SameSite=Strict` or `Lax`, CSRF vectors remain open.
+
+**Fix:** When writing auth-related cookies, always set `Secure; HttpOnly; SameSite=Strict`. Review all cookie writes in `packages/analytics-js-cookies/src/cookiesUtilities.ts` and the legacy utilities for the same gap.
+
+---
+
+### M-11: PII Potentially Exposed in Error Logs
+
+**File:** `packages/analytics-js/src/services/ErrorHandler/utils.ts`
+**Severity:** MEDIUM
+
+Error handling logs event payloads without redacting user-identifying fields. Events routinely contain traits such as `email`, `name`, `phone`, and other PII. Logged verbatim in browser consoles or forwarded to Bugsnag, this data leaks to monitoring systems that may have different retention policies than the customer's data plane.
+
+**Fix:** Apply a field-level redaction step before logging events — strip or mask known PII fields (`email`, `userId`, `traits.*`) in the error handler.
+
+---
+
+### M-12: `tmp` Dependency Override Pinned to a Version With Known CVEs
+
+**File:** `package.json:221`
+**Severity:** MEDIUM
+
+```json
+"tmp": "0.2.5"
+```
+
+Version 0.2.5 of the `tmp` package is outdated. This is a transitive dependency override applied to pin away from an older version, but 0.2.5 itself has reported vulnerabilities (insecure temporary file creation — CVE-2014-9143 family). The latest stable release should be used instead.
+
+**Fix:** Update the override to the latest stable version of `tmp`.
+
+---
+
 ### M-9: NPM Cache Without Additional Integrity Verification
 
 **Files:** All workflow files using `cache: 'npm'`
@@ -276,9 +313,40 @@ GitHub Actions npm caching does not re-run `npm ci` integrity checks on the cach
 
 ---
 
-## Low Findings
+### H-6: `containerId` Injected Into `innerHTML` in GoogleOptimize Integration
 
-### L-1: `window` Global Namespace Pollution
+**File:** `packages/analytics-js-integrations/src/integrations/GoogleOptimize/browser.js:60–66`
+**Severity:** HIGH
+
+```javascript
+const js = document.createElement('script');
+js.innerHTML = `(function(a,s,y,n,c,h,i,d,e){...})(window,document.documentElement,'${this.containerId}',...);`;
+```
+
+`this.containerId` is interpolated directly into a template literal that is assigned to `innerHTML`. If the destination configuration returned by the data plane is compromised (or if a rogue value reaches the SDK), an attacker can inject arbitrary JavaScript into the anti-flicker snippet.
+
+**Fix:** Validate `containerId` against the expected format (e.g. `GTM-[A-Z0-9]+`) before use, and construct the script element via `document.createElement('script')` with argument passing through a proper DOM attribute rather than code generation.
+
+---
+
+### H-7: Unquoted Shell Variables in S3 Deployment Script
+
+**File:** `scripts/list-sdk-components.sh:46,53` and `.github/workflows/deploy.yml:128–129`
+**Severity:** HIGH
+
+```bash
+aws s3 ls s3://$BUCKET_NAME/$DIRECTORY_PATH/          # line 46 — unquoted
+echo "<!DOCTYPE html>" > $OUTPUT_HTML_FILE_PATH        # line 53 — unquoted
+jq ".version = \"$NEW_VERSION_JS\"" packages/analytics-js/package.json > tmp && mv tmp ...
+```
+
+Unquoted variables are subject to word splitting and glob expansion. If `BUCKET_NAME` or `DIRECTORY_PATH` contain spaces or shell metacharacters, the command interpretation changes unpredictably. The `> tmp` redirect in the `jq` pipeline also creates a predictable filename (see L-2 for the TOCTOU aspect).
+
+**Fix:** Double-quote all shell variable references: `"$BUCKET_NAME"`, `"$DIRECTORY_PATH"`, `"$OUTPUT_HTML_FILE_PATH"`.
+
+---
+
+## Medium Findings
 
 **Files:**
 - `packages/loading-scripts/src/index.ts:11–12`
@@ -288,6 +356,17 @@ GitHub Actions npm caching does not re-run `npm ci` integrity checks on the cach
 The SDK assigns properties directly to `window` (e.g. `window.bugsnagClient`). Third-party scripts on the same page could overwrite these properties before the SDK checks them, potentially redirecting SDK behaviour.
 
 **Fix:** Use a Symbol-keyed property or a namespaced object, and perform an existence check before assigning.
+
+---
+
+### L-3: Event Data Stored Unencrypted in `localStorage`/`sessionStorage`
+
+**Files:** `packages/analytics-js/src/services/StoreManager/storages/LocalStorage.ts`, `packages/analytics-js-legacy-utilities/src/storage/storage.js`
+**Severity:** LOW
+
+Queued events and session data are stored in browser storage in plain JSON. On a shared device, or if the site is subject to an XSS attack, all queued events (potentially containing PII) are accessible to the attacker.
+
+**Assessment:** This is an accepted browser SDK limitation. Encryption at rest in `localStorage` does not provide meaningful security against XSS (the attacker can simply call the decryption API too). The higher-priority fix is eliminating XSS vectors. Documenting this limitation for SDK users is worthwhile.
 
 ---
 
@@ -326,9 +405,14 @@ The following good practices were noted and should be maintained:
 ## Recommended Remediation Priority
 
 1. **C-1** — Replace `curl | bash` immediately; supply-chain risk on every CI run.
-2. **H-5** — Fix shell injection via GitHub context variables; low effort, high impact.
-3. **H-3** — Move secrets out of `env:` blocks.
-4. **H-4** — Refactor Braze dynamic `new Function()` to a static dispatch table.
-5. **H-1** — Replace `unfor19/install-aws-cli-action` with the official AWS action.
-6. **H-2** — Narrow `rollback.yml` permissions.
-7. **M-1 through M-9** — Address in order of exposure surface.
+2. **H-6** — Validate and sanitise `containerId` before `innerHTML` injection in GoogleOptimize.
+3. **H-5** — Fix shell injection via GitHub context variables; low effort, high impact.
+4. **H-7** — Quote all shell variables in `list-sdk-components.sh` and deploy scripts.
+5. **H-3** — Move secrets out of `env:` blocks.
+6. **H-4** — Refactor Braze dynamic `new Function()` to a static dispatch table.
+7. **H-1** — Replace `unfor19/install-aws-cli-action` with the official AWS action.
+8. **H-2** — Narrow `rollback.yml` permissions.
+9. **M-10** — Add `Secure; HttpOnly; SameSite=Strict` to auth token cookies.
+10. **M-11** — Redact PII fields in error handler before logging.
+11. **M-12** — Update `tmp` override to latest version.
+12. **M-1 through M-9** — Address in order of exposure surface.
